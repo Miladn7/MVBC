@@ -28,18 +28,21 @@ df_validation[['bias_original_p', 'bias_original_t']] = (x_validation - y_valida
 ## BIAS CORRECTION METHODS
 
 bcmethods = [
-    SBCK.CDFt(), # 1 - Statistical quantile-based bias correction
-    SBCK.R2D2(), # 2 - Multivariate rank resampling
-    MLBCK.N3BC(neuralnetwork=models.ConvLSTMNeuralMVBC()), # 3 - Neural net: Conv + LSTM
-    #MLBCK.N3BC(neuralnetwork=models.TransformerBiasCorrection()), # 4 - Neural net: Transformer
-    #MLBCK.N3BC(neuralnetwork=models.FCNeuralMVBC()), # 5 - Fully connected naive neural net
-    #MLBCK.N3BC(neuralnetwork=models.ConvNeuralMVBC()), # 6 - Convolutional naive neural net
-    MLBCK.N3BC(neuralnetwork=models.LSTMNeuralMVBC()),  # 7 - LSTM
+    SBCK.CDFt(), #1 - Statistical quantile-based bias correction
+    SBCK.R2D2(), #2 - Multivariate rank resampling
+    MLBCK.N3BC(neuralnetwork=models.AdvancedLSTMNeuralMVBC()),
+    MLBCK.N3BC(neuralnetwork=models.ConvLSTMNeuralMVBC()), #3 - Neural net: Conv + LSTM
+    #MLBCK.N3BC(neuralnetwork=models.TransformerBiasCorrection()), #4 - Neural net: Transformer
+    MLBCK.N3BC(neuralnetwork=models.FCNeuralMVBC()), #5 - Fully connected naive neural net
+    MLBCK.N3BC(neuralnetwork=models.ConvNeuralMVBC()), #6 - Convolutional naive neural net
+    MLBCK.N3BC(neuralnetwork=models.LSTMNeuralMVBC()),  #7 - LSTM
 ]
 
 for bcmethod in bcmethods:
 
-    name = bcmethod.name if hasattr(bcmethod, 'name') else bcmethod.__class__.__name__
+    name = bcmethod.__class__.__name__
+    if hasattr(bcmethod, 'neuralnetwork'):
+        name = bcmethod.neuralnetwork.__class__.__name__
 
     if (len(inspect.signature(bcmethod.fit).parameters) == 3):
         # fit bcmethod with calibration data

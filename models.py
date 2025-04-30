@@ -18,16 +18,7 @@ class ConvLSTMNeuralMVBC(torch.nn.Module):
         lstm_out, _ = self.lstm(x)
         return self.fc(lstm_out)
 
-class TransformerBiasCorrection(torch.nn.Module):
-    def __init__(self, input_size=2, hidden_size=64, num_layers=2):
-        super().__init__()
-        self.encoder_layer = TransformerEncoderLayer(d_model=input_size, nhead=2, dim_feedforward=hidden_size)
-        self.transformer_encoder = TransformerEncoder(self.encoder_layer, num_layers=num_layers)
-        self.fc = torch.nn.Linear(input_size, 2)  # Output layer
 
-    def forward(self, x):
-        x = self.transformer_encoder(x)
-        return self.fc(x)
 class LSTMNeuralMVBC(torch.nn.Module):
     def __init__(self):
         super().__init__()

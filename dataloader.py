@@ -17,4 +17,6 @@ def load_data(year_start, year_end):
 
     df = df[(df.index.year >= year_start) & (df.index.year <= year_end)] # select years between start and end
 
+    df = df[df.index.month.isin([6, 7, 8, 9])] # Only Summer + Sep
+
     return df
