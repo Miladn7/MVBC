@@ -126,10 +126,10 @@ y_calibration = (y_calibration - min_values) / (max_values - min_values)
 y_validation = (y_validation - min_values) / (max_values - min_values)
 
 # ✅ MODEL SETUP
-model = models.ConvNeuralMVBC()
+#model = models.ConvNeuralMVBC()
 #model = models.AdvancedLSTMNeuralMVBC()
 # model = models.LSTMNeuralMVBC()
-# model = models.ConvLSTMNeuralMVBC()
+model = models.ConvLSTMNeuralMVBC()
 
 
 class WeightedMSELoss(nn.Module):
@@ -155,8 +155,8 @@ class WeightedMSELoss(nn.Module):
 # lossfunction = nn.HuberLoss(delta=1.0)  # Using Huber Loss
 lossfunction = WeightedMSELoss()
 
-# optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)  # Using AdamW
-optimizer = optim.Adam(model.parameters(), lr=0.0005)
+optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)  # Using AdamW
+#optimizer = optim.Adam(model.parameters(), lr=0.0005)
 # optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 # optimizer = optim.RMSprop(model.parameters(), lr=0.001)
 
@@ -254,31 +254,36 @@ df_validation_bias_t.plot.bar(ax=axes[1], title='Temperature bias', xlabel='Mont
 
 fig.suptitle('Average bias per month (5-day windows) – Validation Period 1996–2005')
 
-plt.show()
+#plt.show()
 
 ## PLOT DATA SHIFT
 
 # df_validation[['bias_original_p', 'bias_corrected_p']]
 #Plot for compund events
-event_mask = pd.Series(labels_val, index=center_idx)
+event_mask = pd.Series(labels_val, index=center_idx)  # assuming labels_val already exists
 
 for event_type in ['single_extreme', 'compound', 'full_extreme']:
-    subset = df_eval[event_mask == event_type]
+    df_event = df_eval[event_mask == event_type]
 
-    if len(subset) == 0:
-        print(f"No data for event type: {event_type}")
+    if len(df_event) == 0:
+        print(f"No data for: {event_type}")
         continue
 
-    bias_p = subset[['bias_original_p', 'bias_corrected_p']].groupby(subset.index.month).mean()
-    bias_t = subset[['bias_original_t', 'bias_corrected_t']].groupby(subset.index.month).mean()
+    df_event_bias_p = df_event[['bias_original_p', 'bias_corrected_p']].groupby(df_event.index.month).mean()
+    df_event_bias_t = df_event[['bias_original_t', 'bias_corrected_t']].groupby(df_event.index.month).mean()
 
-    minvalue = min(bias_p.min().min(), bias_t.min().min())
-    maxvalue = max(bias_p.max().max(), bias_t.max().max())
+    minvalue = min(df_event_bias_p.min().min(), df_event_bias_t.min().min())
+    maxvalue = max(df_event_bias_p.max().max(), df_event_bias_t.max().max())
     limitvalue = max(abs(minvalue), abs(maxvalue)) * 1.2
 
     fig, axes = plt.subplots(nrows=2, ncols=1, layout='constrained')
-    bias_p.plot.bar(ax=axes[0], title=f'Precipitation Bias – {event_type}', xlabel='Month', ylabel='Bias', ylim=(-limitvalue, limitvalue))
-    bias_t.plot.bar(ax=axes[1], title=f'Temperature Bias – {event_type}', xlabel='Month', ylabel='Bias', ylim=(-limitvalue, limitvalue))
 
-    fig.suptitle(f'Bias Reduction During {event_type.upper()} Events')
+    df_event_bias_p.plot.bar(ax=axes[0], title=f'Precipitation bias – {event_type}', xlabel='Month', ylabel='Bias',
+                             ylim=(-limitvalue, limitvalue))
+    df_event_bias_t.plot.bar(ax=axes[1], title=f'Temperature bias – {event_type}', xlabel='Month', ylabel='Bias',
+                             ylim=(-limitvalue, limitvalue))
+
+    fig.suptitle(f'Average bias per month – {event_type.upper()} Events (Validation: 1996–2005)')
+
     plt.show()
+
