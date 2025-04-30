@@ -101,12 +101,20 @@ def build_sequences_with_flags(df, window=5):
 
             weights.append(w)
 
-    return np.array(x_seq), np.array(y_seq), np.array(weights)
+    event_labels = [
+        "full_extreme" if w == 3.0 else
+        "compound" if w == 2.5 else
+        "single_extreme" if w == 2.0 else
+        "normal"
+        for w in weights
+    ]
+
+    return np.array(x_seq), np.array(y_seq), np.array(weights), np.array(event_labels)
 
 
 # ✅ LOAD AND PROCESS SEQUENCES
-x_calibration, y_calibration, weights_cal = build_sequences_with_flags(df_calibration, window)
-x_validation, y_validation, weights_val = build_sequences_with_flags(df_validation, window)
+x_calibration, y_calibration, weights_cal, labels_cal = build_sequences_with_flags(df_calibration, window)
+x_validation, y_validation, weights_val, labels_val = build_sequences_with_flags(df_validation, window)
 
 # ✅ NORMALIZATION
 min_values = x_calibration.min(axis=(0, 1))
@@ -123,9 +131,6 @@ model = models.ConvNeuralMVBC()
 # model = models.LSTMNeuralMVBC()
 # model = models.ConvLSTMNeuralMVBC()
 
-
-# model = models.LSTMNeuralMVBC()
-# model = models.ConvLSTMNeuralMVBC()
 
 class WeightedMSELoss(nn.Module):
     def __init__(self, reduction='mean'):
@@ -254,3 +259,26 @@ plt.show()
 ## PLOT DATA SHIFT
 
 # df_validation[['bias_original_p', 'bias_corrected_p']]
+#Plot for compund events
+event_mask = pd.Series(labels_val, index=center_idx)
+
+for event_type in ['single_extreme', 'compound', 'full_extreme']:
+    subset = df_eval[event_mask == event_type]
+
+    if len(subset) == 0:
+        print(f"No data for event type: {event_type}")
+        continue
+
+    bias_p = subset[['bias_original_p', 'bias_corrected_p']].groupby(subset.index.month).mean()
+    bias_t = subset[['bias_original_t', 'bias_corrected_t']].groupby(subset.index.month).mean()
+
+    minvalue = min(bias_p.min().min(), bias_t.min().min())
+    maxvalue = max(bias_p.max().max(), bias_t.max().max())
+    limitvalue = max(abs(minvalue), abs(maxvalue)) * 1.2
+
+    fig, axes = plt.subplots(nrows=2, ncols=1, layout='constrained')
+    bias_p.plot.bar(ax=axes[0], title=f'Precipitation Bias – {event_type}', xlabel='Month', ylabel='Bias', ylim=(-limitvalue, limitvalue))
+    bias_t.plot.bar(ax=axes[1], title=f'Temperature Bias – {event_type}', xlabel='Month', ylabel='Bias', ylim=(-limitvalue, limitvalue))
+
+    fig.suptitle(f'Bias Reduction During {event_type.upper()} Events')
+    plt.show()
