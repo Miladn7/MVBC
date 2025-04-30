@@ -105,8 +105,10 @@ y_calibration = (y_calibration - min_values) / (max_values - min_values)
 y_validation = (y_validation - min_values) / (max_values - min_values)
 
 # ✅ MODEL SETUP
-# model = models.ConvNeuralMVBC()
-model = models.AdvancedLSTMNeuralMVBC()
+model = models.ConvNeuralMVBC()
+#model = models.AdvancedLSTMNeuralMVBC()
+# model = models.LSTMNeuralMVBC()
+# model = models.ConvLSTMNeuralMVBC()
 
 
 # model = models.LSTMNeuralMVBC()

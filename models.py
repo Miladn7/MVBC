@@ -1,7 +1,6 @@
 import torch
-
 from torch.nn import Conv1d, LSTM, Linear
-from torch.nn import TransformerEncoder, TransformerEncoderLayer
+import torch.nn as nn
 
 
 class ConvLSTMNeuralMVBC(torch.nn.Module):
@@ -18,7 +17,48 @@ class ConvLSTMNeuralMVBC(torch.nn.Module):
         lstm_out, _ = self.lstm(x)
         return self.fc(lstm_out)
 
+class AdvancedLSTMNeuralMVBC(nn.Module):
+    def __init__(self, input_size=2, hidden_size=128, embedding_size=64, num_layers=3, dropout=0.2):
+        super().__init__()
 
+        self.encoder_lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            batch_first=True
+        )
+
+        self.embedding = nn.Sequential(
+            nn.Linear(hidden_size, embedding_size),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+
+        self.decoder_lstm = nn.LSTM(
+            input_size=embedding_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            batch_first=True
+        )
+
+        self.output_layer = nn.Linear(hidden_size, input_size)
+
+    def forward(self, x):
+        # Encoder
+        encoded_seq, _ = self.encoder_lstm(x)
+
+        # Bottleneck representation
+        embedded = self.embedding(encoded_seq)
+
+        # Decoder
+        decoded_seq, _ = self.decoder_lstm(embedded)
+
+        # Final output
+        output = self.output_layer(decoded_seq)
+
+        return output
 class LSTMNeuralMVBC(torch.nn.Module):
     def __init__(self):
         super().__init__()
