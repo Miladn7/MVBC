@@ -36,8 +36,21 @@ def detect_heatwaves(df, threshold_quantile=0.95, min_duration=5):
     return heatwave_flags
 
 
-def detect_droughts(df, threshold_quantile=0.05):
-    return df['value_obsv_p'] < df['value_obsv_p'].quantile(threshold_quantile)
+def detect_droughts(df, threshold_quantile=0.05, min_duration=5):
+    precip = df['value_obsv_p']
+    threshold = precip.quantile(threshold_quantile)
+    dry_days = precip < threshold
+    drought_flags = pd.Series(False, index=df.index)
+    streak = 0
+    for i in range(len(dry_days)):
+        if dry_days.iloc[i]:
+            streak += 1
+            if streak >= min_duration:
+                drought_flags.iloc[i - min_duration + 1 : i + 1] = True
+        else:
+            streak = 0
+    return drought_flags
+
 
 
 # 🔁 BUILD 5-DAY SEQUENCES + EXTREME EVENT WEIGHTING (compound-aware)
