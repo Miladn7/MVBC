@@ -55,7 +55,7 @@ def detect_droughts(df, threshold_quantile=0.05, min_duration=5):
 
 # 🔁 BUILD 5-DAY SEQUENCES + EXTREME EVENT WEIGHTING (compound-aware)
 def build_sequences_with_flags(df, window=5):
-    x_seq, y_seq, weights = [], [], []
+    x_seq, y_seq, weights, labels = [], [], [], []
 
     # Detect individual events
     heatwave_flags = detect_heatwaves(df)
@@ -64,7 +64,6 @@ def build_sequences_with_flags(df, window=5):
     # Convert to integers
     heat_flags = heatwave_flags.astype(int)
     drought_flags = drought_flags.astype(int)
-
     # Combined score: 0 (none), 1 (one of them), 2 (both)
     compound_flags = heat_flags + drought_flags
 
@@ -78,6 +77,7 @@ def build_sequences_with_flags(df, window=5):
         hf = heat_flags[group.index]
         df_ = drought_flags[group.index]
         cf = compound_flags[group.index]
+        dates = group.index
 
         for i in range(len(group) - window + 1):
             x_seq.append(x[i:i + window])
@@ -90,26 +90,30 @@ def build_sequences_with_flags(df, window=5):
 
             if h and d:
                 w = 2.5  # compound event
+                label = "compound"
             elif h or d:
                 w = 2.0  # one extreme
+                label = "single_extreme"
             else:
                 w = 1.0  # normal
+                label = "normal"
+
 
             # Optional: Boost for very intense compound windows
             if c >= window:
                 w = 3.0  # every day is extreme
+                label = "full_extreme"
+
+            # 🔶 Additional monthly weight boost (e.g. July=7 or August=8)
+            mid_date = dates[i + window // 2]
+            if mid_date.month in [7, 8]:
+                w *= 1.2  # Boost summer weight
 
             weights.append(w)
+            labels.append(label)
 
-    event_labels = [
-        "full_extreme" if w == 3.0 else
-        "compound" if w == 2.5 else
-        "single_extreme" if w == 2.0 else
-        "normal"
-        for w in weights
-    ]
 
-    return np.array(x_seq), np.array(y_seq), np.array(weights), np.array(event_labels)
+    return np.array(x_seq), np.array(y_seq), np.array(weights), np.array(labels)
 
 
 # ✅ LOAD AND PROCESS SEQUENCES
@@ -117,43 +121,63 @@ x_calibration, y_calibration, weights_cal, labels_cal = build_sequences_with_fla
 x_validation, y_validation, weights_val, labels_val = build_sequences_with_flags(df_validation, window)
 
 # ✅ NORMALIZATION
-min_values = x_calibration.min(axis=(0, 1))
+# Separate per-variable min-max
+min_values = x_calibration.min(axis=(0, 1))  # shape: (2,)
 max_values = x_calibration.max(axis=(0, 1))
 
-x_calibration = (x_calibration - min_values) / (max_values - min_values)
-x_validation = (x_validation - min_values) / (max_values - min_values)
-y_calibration = (y_calibration - min_values) / (max_values - min_values)
-y_validation = (y_validation - min_values) / (max_values - min_values)
+# Use broadcasting for correct shape (samples, window, 2)
+x_calibration = (x_calibration - min_values[None, None, :]) / (max_values - min_values)[None, None, :]
+x_validation = (x_validation - min_values[None, None, :]) / (max_values - min_values)[None, None, :]
+
+y_calibration = (y_calibration - min_values[None, None, :]) / (max_values - min_values)[None, None, :]
+y_validation = (y_validation - min_values[None, None, :]) / (max_values - min_values)[None, None, :]
 
 # ✅ MODEL SETUP
 #model = models.ConvNeuralMVBC()
-#model = models.AdvancedLSTMNeuralMVBC()
-# model = models.LSTMNeuralMVBC()
-model = models.ConvLSTMNeuralMVBC()
+model = models.AdvancedLSTMNeuralMVBC()
+#model = models.LSTMNeuralMVBC()
+#model = models.ConvLSTMNeuralMVBC()
 
 
-class WeightedMSELoss(nn.Module):
-    def __init__(self, reduction='mean'):
+class WeightedHuberLoss(nn.Module):
+    def __init__(self, delta=1.0, reduction='mean'):
         super().__init__()
+        self.delta = delta
         self.reduction = reduction
 
     def forward(self, pred, target, weights):
-        loss = ((pred - target) ** 2).mean(dim=(1, 2))  # per sequence
+        error = pred - target
+        is_small_error = torch.abs(error) < self.delta
+        squared_loss = 0.5 * error**2
+        linear_loss = self.delta * (torch.abs(error) - 0.5 * self.delta)
+        loss = torch.where(is_small_error, squared_loss, linear_loss)
+        loss = loss.mean(dim=(1, 2))  # average over sequence
         weighted = weights * loss
-        if self.reduction == 'sum':
-            return torch.sum(weighted)
-        elif self.reduction == 'none':
-            return weighted
-        else:
-            return torch.mean(weighted)
+        return torch.mean(weighted) if self.reduction == 'mean' else weighted
 
 
-# lossfunction = torch.nn.MSELoss()
-# lossfunction = nn.MSELoss()
+class VariableWeightedMSELoss(nn.Module):
+    def __init__(self, temp_weight=1.0, precip_weight=2.0):  # boost precip
+        super().__init__()
+        self.temp_weight = temp_weight
+        self.precip_weight = precip_weight
+
+    def forward(self, pred, target):
+        # Assume shape: (batch, time, features)
+        loss_temp = ((pred[:, :, 1] - target[:, :, 1]) ** 2).mean()
+        loss_precip = ((pred[:, :, 0] - target[:, :, 0]) ** 2).mean()
+        return self.temp_weight * loss_temp + self.precip_weight * loss_precip
+
+
+#lossfunction = torch.nn.MSELoss()
+#lossfunction = nn.MSELoss()
 # lossfunction = nn.L1Loss()  # Using MAE
 # lossfunction = nn.SmoothL1Loss(beta=1.0)  # Using Smooth L1 Loss
 # lossfunction = nn.HuberLoss(delta=1.0)  # Using Huber Loss
-lossfunction = WeightedMSELoss()
+# lossfunction = WeightedMSELoss()
+# lossfunction = VariableWeightedMSELoss()
+lossfunction = WeightedHuberLoss(delta=1.0)
+
 
 optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)  # Using AdamW
 #optimizer = optim.Adam(model.parameters(), lr=0.0005)
@@ -185,7 +209,7 @@ for epoch in range(1000):
     if z_train_sample.shape[1] != y_train_sample.shape[1]:
         z_train_sample = z_train_sample[:, :y_train_sample.shape[1], :]
 
-    train_loss = lossfunction(z_train_sample, y_train_sample, w_train_sample)
+    train_loss = lossfunction(z_train_sample,y_train_sample ,w_train_sample)
     train_loss.backward()
     optimizer.step()
 
@@ -200,7 +224,7 @@ for epoch in range(1000):
         if z_test_sample.shape[1] != y_test_sample.shape[1]:
             z_test_sample = z_test_sample[:, :y_test_sample.shape[1], :]
 
-        test_loss = lossfunction(z_test_sample, y_test_sample, w_test_sample)
+        test_loss = lossfunction(z_test_sample, y_test_sample , w_test_sample)
 
         print(f"epoch: {epoch} - test loss: {test_loss.item():.6f}")
 
