@@ -5,7 +5,7 @@ import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-
+import calendar
 import dataloader
 import models
 
@@ -55,7 +55,7 @@ def detect_droughts(df, threshold_quantile=0.05, min_duration=5):
 
 # 🔁 BUILD 5-DAY SEQUENCES + EXTREME EVENT WEIGHTING (compound-aware)
 def build_sequences_with_flags(df, window=5):
-    x_seq, y_seq, weights = [], [], []
+    x_seq, y_seq, weights, labels = [], [], [], []
 
     # Detect individual events
     heatwave_flags = detect_heatwaves(df)
@@ -64,7 +64,6 @@ def build_sequences_with_flags(df, window=5):
     # Convert to integers
     heat_flags = heatwave_flags.astype(int)
     drought_flags = drought_flags.astype(int)
-
     # Combined score: 0 (none), 1 (one of them), 2 (both)
     compound_flags = heat_flags + drought_flags
 
@@ -78,6 +77,7 @@ def build_sequences_with_flags(df, window=5):
         hf = heat_flags[group.index]
         df_ = drought_flags[group.index]
         cf = compound_flags[group.index]
+        dates = group.index
 
         for i in range(len(group) - window + 1):
             x_seq.append(x[i:i + window])
@@ -90,47 +90,52 @@ def build_sequences_with_flags(df, window=5):
 
             if h and d:
                 w = 2.5  # compound event
+                label = "compound"
             elif h or d:
                 w = 2.0  # one extreme
+                label = "single_extreme"
             else:
                 w = 1.0  # normal
+                label = "normal"
+
 
             # Optional: Boost for very intense compound windows
             if c >= window:
                 w = 3.0  # every day is extreme
+                label = "full_extreme"
 
             weights.append(w)
+            labels.append(label)
 
-    event_labels = [
-        "full_extreme" if w == 3.0 else
-        "compound" if w == 2.5 else
-        "single_extreme" if w == 2.0 else
-        "normal"
-        for w in weights
-    ]
 
-    return np.array(x_seq), np.array(y_seq), np.array(weights), np.array(event_labels)
+    return np.array(x_seq), np.array(y_seq), np.array(weights), np.array(labels)
 
 
 # ✅ LOAD AND PROCESS SEQUENCES
 x_calibration, y_calibration, weights_cal, labels_cal = build_sequences_with_flags(df_calibration, window)
 x_validation, y_validation, weights_val, labels_val = build_sequences_with_flags(df_validation, window)
 
+# ✅ Preserve original for consistent bias calculation
+x_val_orig = x_validation.copy()
+y_val_orig = y_validation.copy()
+
 # ✅ NORMALIZATION
-min_values = x_calibration.min(axis=(0, 1))
+# Separate per-variable min-max
+min_values = x_calibration.min(axis=(0, 1))  # shape: (2,)
 max_values = x_calibration.max(axis=(0, 1))
 
-x_calibration = (x_calibration - min_values) / (max_values - min_values)
-x_validation = (x_validation - min_values) / (max_values - min_values)
-y_calibration = (y_calibration - min_values) / (max_values - min_values)
-y_validation = (y_validation - min_values) / (max_values - min_values)
+# Use broadcasting for correct shape (samples, window, 2)
+x_calibration = (x_calibration - min_values[None, None, :]) / (max_values - min_values)[None, None, :]
+x_validation = (x_validation - min_values[None, None, :]) / (max_values - min_values)[None, None, :]
+
+y_calibration = (y_calibration - min_values[None, None, :]) / (max_values - min_values)[None, None, :]
+y_validation = (y_validation - min_values[None, None, :]) / (max_values - min_values)[None, None, :]
 
 # ✅ MODEL SETUP
 #model = models.ConvNeuralMVBC()
-#model = models.AdvancedLSTMNeuralMVBC()
-# model = models.LSTMNeuralMVBC()
-model = models.ConvLSTMNeuralMVBC()
-
+model = models.AdvancedLSTMNeuralMVBC()
+#model = models.LSTMNeuralMVBC()
+#model = models.ConvLSTMNeuralMVBC()
 
 class WeightedMSELoss(nn.Module):
     def __init__(self, reduction='mean'):
@@ -138,7 +143,8 @@ class WeightedMSELoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, pred, target, weights):
-        loss = ((pred - target) ** 2).mean(dim=(1, 2))  # per sequence
+        # Compute per-sample MSE over sequences
+        loss = ((pred - target) ** 2).mean(dim=(1, 2))  # shape: (batch,)
         weighted = weights * loss
         if self.reduction == 'sum':
             return torch.sum(weighted)
@@ -148,12 +154,45 @@ class WeightedMSELoss(nn.Module):
             return torch.mean(weighted)
 
 
-# lossfunction = torch.nn.MSELoss()
-# lossfunction = nn.MSELoss()
-# lossfunction = nn.L1Loss()  # Using MAE
-# lossfunction = nn.SmoothL1Loss(beta=1.0)  # Using Smooth L1 Loss
-# lossfunction = nn.HuberLoss(delta=1.0)  # Using Huber Loss
-lossfunction = WeightedMSELoss()
+class WeightedHuberLoss(nn.Module):
+    def __init__(self, delta=1.0, reduction='mean'):
+        super().__init__()
+        self.delta = delta
+        self.reduction = reduction
+
+    def forward(self, pred, target, weights):
+        error = pred - target
+        is_small_error = torch.abs(error) < self.delta
+        squared_loss = 0.5 * error**2
+        linear_loss = self.delta * (torch.abs(error) - 0.5 * self.delta)
+        loss = torch.where(is_small_error, squared_loss, linear_loss)
+        loss = loss.mean(dim=(1, 2))  # average over sequence
+        weighted = weights * loss
+        return torch.mean(weighted) if self.reduction == 'mean' else weighted
+
+
+class VariableWeightedMSELoss(nn.Module):
+    def __init__(self, temp_weight=1.0, precip_weight=2.0):  # boost precip
+        super().__init__()
+        self.temp_weight = temp_weight
+        self.precip_weight = precip_weight
+
+    def forward(self, pred, target):
+        # Assume shape: (batch, time, features)
+        loss_temp = ((pred[:, :, 1] - target[:, :, 1]) ** 2).mean()
+        loss_precip = ((pred[:, :, 0] - target[:, :, 0]) ** 2).mean()
+        return self.temp_weight * loss_temp + self.precip_weight * loss_precip
+
+
+#lossfunction = torch.nn.MSELoss()
+lossfunction = nn.MSELoss()
+#lossfunction = nn.L1Loss()  # Using MAE
+#lossfunction = nn.SmoothL1Loss(beta=1.0)  # Using Smooth L1 Loss
+#lossfunction = nn.HuberLoss(delta=1.0)  # Using Huber Loss
+#lossfunction = WeightedMSELoss()
+#lossfunction = VariableWeightedMSELoss()
+#lossfunction = WeightedHuberLoss(delta=1.0)
+
 
 optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)  # Using AdamW
 #optimizer = optim.Adam(model.parameters(), lr=0.0005)
@@ -169,46 +208,51 @@ weights_val = np.array(weights_val)
 train_losses = []
 test_losses = []
 
+for epoch in range(1000):batch_size = 128
+
 for epoch in range(1000):
     model.train()
-    optimizer.zero_grad()
+    total_loss = 0.0
 
-    # sample a random batch
+    for i in range(0, len(x_train), batch_size):
+        x_batch = torch.tensor(x_train[i:i+batch_size], dtype=torch.float32)
+        y_batch = torch.tensor(y_train[i:i+batch_size], dtype=torch.float32)
+        w_batch = torch.tensor(weights_cal[i:i+batch_size], dtype=torch.float32)
 
-    idx = np.random.choice(len(x_train), len(x_test))
-    x_train_sample = torch.tensor(x_train[idx], dtype=torch.float32)
-    y_train_sample = torch.tensor(y_train[idx], dtype=torch.float32)
-    w_train_sample = torch.tensor(weights_cal[idx], dtype=torch.float32)
+        optimizer.zero_grad()
+        z_batch = model(x_batch)
 
-    z_train_sample = model(x_train_sample)
+        if z_batch.shape[1] != y_batch.shape[1]:
+            z_batch = z_batch[:, :y_batch.shape[1], :]
 
-    if z_train_sample.shape[1] != y_train_sample.shape[1]:
-        z_train_sample = z_train_sample[:, :y_train_sample.shape[1], :]
+        loss = lossfunction(z_batch, y_batch ) #w_batch
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
 
-    train_loss = lossfunction(z_train_sample, y_train_sample, w_train_sample)
-    train_loss.backward()
-    optimizer.step()
+    avg_train_loss = total_loss / (len(x_train) // batch_size)
 
     if epoch % 10 == 0:
         model.eval()
-        x_test_sample = torch.tensor(x_test, dtype=torch.float32)
-        y_test_sample = torch.tensor(y_test, dtype=torch.float32)
-        w_test_sample = torch.tensor(weights_val, dtype=torch.float32)
+        x_test_tensor = torch.tensor(x_test, dtype=torch.float32)
+        y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
+        w_test_tensor = torch.tensor(weights_val, dtype=torch.float32)
 
-        z_test_sample = model(x_test_sample)
+        z_test_tensor = model(x_test_tensor)
 
-        if z_test_sample.shape[1] != y_test_sample.shape[1]:
-            z_test_sample = z_test_sample[:, :y_test_sample.shape[1], :]
+        if z_test_tensor.shape[1] != y_test_tensor.shape[1]:
+            z_test_tensor = z_test_tensor[:, :y_test_tensor.shape[1], :]
 
-        test_loss = lossfunction(z_test_sample, y_test_sample, w_test_sample)
+        test_loss = lossfunction(z_test_tensor, y_test_tensor ) #w_test_tensor
 
-        print(f"epoch: {epoch} - test loss: {test_loss.item():.6f}")
+        print(f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.6f} | Test Loss: {test_loss.item():.6f}")
 
-        train_losses.append(train_loss.item())
+        train_losses.append(avg_train_loss)
         test_losses.append(test_loss.item())
 
-        if test_loss <= min(test_losses):
+        if test_loss.item() <= min(test_losses):
             torch.save(model.state_dict(), os.path.join('checkpoints', model.__class__.__name__))
+
 
 # ✅ PLOT TRAINING CURVE
 plt.plot(train_losses, label='training loss')
@@ -236,7 +280,7 @@ z_validation = min_values + z_validation * (max_values - min_values)
 # ✅ MONTHLY BIAS PLOTTING
 center_idx = [df_validation.index[i + window // 2] for i in range(len(z_validation))]
 df_eval = pd.DataFrame(index=pd.DatetimeIndex(center_idx))
-df_eval[['bias_original_p', 'bias_original_t']] = (x_validation - y_validation)[:, window // 2, :]
+df_eval[['bias_original_p', 'bias_original_t']] = (x_val_orig - y_val_orig)[:, window // 2, :]
 df_eval[['bias_corrected_p', 'bias_corrected_t']] = (z_validation - y_validation)[:, window // 2, :]
 
 df_validation_bias_p = df_eval[['bias_original_p', 'bias_corrected_p']].groupby(df_eval.index.month).mean()
@@ -256,9 +300,13 @@ fig.suptitle('Average bias per month (5-day windows) – Validation Period 1996�
 
 #plt.show()
 
+july_mask = pd.Series(center_idx).dt.month == 7
+print("Weights used in July:", weights_val[july_mask])
+
 ## PLOT DATA SHIFT
 
-# df_validation[['bias_original_p', 'bias_corrected_p']]
+#df_validation[['bias_original_p', 'bias_corrected_p']]
+
 #Plot for compund events
 event_mask = pd.Series(labels_val, index=center_idx)  # assuming labels_val already exists
 
@@ -287,3 +335,44 @@ for event_type in ['single_extreme', 'compound', 'full_extreme']:
 
     plt.show()
 
+# Load benchmark bias results from SBCK & ML models
+df_benchmark = pd.read_csv("results/bias_results_validation.csv", index_col=0, parse_dates=True)
+# === BENCHMARK BAR PLOT: 4 METHODS COMPARED PER MONTH ===
+
+df_validation_bias_p = df_benchmark.filter(like='bias').filter(like='_p').groupby(df_benchmark.index.month).mean()
+df_validation_bias_t = df_benchmark.filter(like='bias').filter(like='_t').groupby(df_benchmark.index.month).mean()
+# 1. Choose method prefixes you want to compare
+methods = ['bias_original', 'bias_AdvancedLSTMNeuralMVBC', 'bias_CDFt', 'bias_R2D2']
+colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+labels = ['Original', 'ML-Corrected', 'CDFt', 'R2D2']
+
+# 2. Prepare month x-axis
+month_names = [calendar.month_abbr[m] for m in range(1, 13)]
+bar_width = 0.2
+x = np.arange(12)  # 12 months
+
+fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10, 6), layout='constrained')
+
+# 3. Precipitation Bias
+for i, method in enumerate(methods):
+    bias_values = df_validation.groupby(df_validation.index.month)[f"{method}_p"].mean()
+    axes[0].bar(x + i * bar_width, bias_values.values, width=bar_width, label=labels[i], color=colors[i])
+axes[0].set_title("Precipitation Bias (Benchmark)")
+axes[0].set_ylabel("Bias")
+axes[0].set_xticks(x + bar_width * 1.5)
+axes[0].set_xticklabels(month_names)
+axes[0].legend()
+
+# 4. Temperature Bias
+for i, method in enumerate(methods):
+    bias_values = df_validation.groupby(df_validation.index.month)[f"{method}_t"].mean()
+    axes[1].bar(x + i * bar_width, bias_values.values, width=bar_width, label=labels[i], color=colors[i])
+axes[1].set_title("Temperature Bias (Benchmark)")
+axes[1].set_ylabel("Bias")
+axes[1].set_xticks(x + bar_width * 1.5)
+axes[1].set_xticklabels(month_names)
+axes[1].legend()
+
+fig.suptitle("Multivariate Bias Correction Benchmark – Monthly Comparison")
+
+plt.show()
